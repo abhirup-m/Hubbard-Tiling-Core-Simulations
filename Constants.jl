@@ -15,3 +15,5 @@
 
 (@isdefined NODAL_POINTS) || const NODAL_POINTS = [(-π/2, -π/2), (-π/2, π/2), (π/2, π/2), (π/2, -π/2)]
 (@isdefined ANTINODAL_POINTS) || const ANTINODAL_POINTS = [(-π, 0.), (0., π), (π, 0.), (0., -π)]
+
+(@isdefined RG_RELEVANCE_TOL) || const RG_RELEVANCE_TOL = 1e-3

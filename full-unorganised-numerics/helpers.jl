@@ -1,6 +1,6 @@
 # helper functions for switching back and forth between the 1D flattened representation (1 → N^2) 
 # and the 2D representation ((1 → N)×(1 → N))
-function map1DTo2D(
+@everywhere function map1DTo2D(
         point::Int64,
         size_BZ::Int64
     )
@@ -14,9 +14,7 @@ function map1DTo2D(
     k_values = range(K_MIN, stop=K_MAX, length=size_BZ)
     return [k_values[kx_index], k_values[ky_index]]
 end
-
-
-function map1DTo2D(
+@everywhere function map1DTo2D(
         point::Vector{Int64},
         size_BZ::Int64
     )
@@ -27,7 +25,6 @@ function map1DTo2D(
     k_values = range(K_MIN, stop=K_MAX, length=size_BZ)
     return [k_values[kx_index], k_values[ky_index]]
 end
-
 
 function map2DTo1D(
         kx_val::Float64,
@@ -41,8 +38,6 @@ function map2DTo1D(
     # covert the row and column indices into an overall flattened index
     return kx_index + (ky_index - 1) * size_BZ
 end
-
-
 function map2DTo1D(
         kx_val::Vector{Float64},
         ky_val::Vector{Float64},
@@ -231,8 +226,9 @@ function PropagateIndices(
 end
 
 
-function bathIntForm(
+@everywhere function bathIntForm(
     bathIntStr::Float64,
+    orbital::String,
     size_BZ::Int64,
     points,
 )
@@ -243,10 +239,30 @@ function bathIntForm(
     k3_vals = map1DTo2D(points[3], size_BZ)
     k4_vals = map1DTo2D(points[4], size_BZ)
     k1_vals = map1DTo2D(points[1], size_BZ)
-    return 0.5 .* bathIntStr .* (
-        cos.(k1_vals[1] .- k2_vals[1] .+ k3_vals[1] .- k4_vals[1]) .+
-        cos.(k1_vals[2] .- k2_vals[2] .+ k3_vals[2] .- k4_vals[2])
-    )
+    if orbital == "d"
+        bathInt = bathIntStr
+        return 0.5 .* bathIntStr .* (
+            cos.(k1_vals[1] .- k2_vals[1] .+ k3_vals[1] .- k4_vals[1]) .-
+            cos.(k1_vals[2] .- k2_vals[2] .+ k3_vals[2] .- k4_vals[2])
+        )
+    elseif orbital == "p"
+        return 0.5 .* bathIntStr .* (
+            cos.(k1_vals[1] .- k2_vals[1] .+ k3_vals[1] .- k4_vals[1]) .+
+            cos.(k1_vals[2] .- k2_vals[2] .+ k3_vals[2] .- k4_vals[2])
+        )
+    elseif orbital == "poff"
+        bathInt = bathIntStr
+        for (kx, ky) in [k1_vals, k2_vals, k3_vals, k4_vals]
+            bathInt = bathInt .* (cos.(kx) + cos.(ky))
+        end
+        return bathInt
+    else
+        bathInt = bathIntStr
+        for (kx, ky) in [k1_vals, k2_vals, k3_vals, k4_vals]
+            bathInt = bathInt .* (cos.(kx) - cos.(ky))
+        end
+        return bathInt
+    end
 end
 
 
@@ -299,18 +315,51 @@ end
 
 
 function Fourier(
-        kondoJMomentum::Matrix{Float64},
-        kvals::Vector{Float64},
+        fermSurfKondoChannels::Vector{Array{Float64, 2}};
+        shellPointsChannels::Union{Nothing, Vector{Vector{Int64}}}=nothing,
+        calculateFor::Union{Nothing, Vector{Int64}}=nothing,
+        type="static",
     )
-
-    kondoJReal = 0 * kondoJMomentum
-    for r1 in 0:(size(kondoJReal)[1]-1)
-        for r2 in r1:(size(kondoJReal)[1]-1)
-            cosk1r1minusk2r2= cos.(r1 .* kVals' .- r2 .* kVals[kVals .≥ 0])
-            kondoJReal[r1, r2] = sum(kondoJMomentum[:, momentumVals .≥ 0] .* cosk1r1minusk2r2)
+    numPoints = size(fermSurfKondoChannels[1])[1] |> sqrt |> Int
+    if isnothing(calculateFor)
+        calculateFor = 1:numPoints^2
+    end
+    realKondoChannels = Matrix{Float64}[]
+    kondoTemp = nothing
+    for (channel, kondoJArray) in enumerate(fermSurfKondoChannels)
+        if isnothing(shellPointsChannels)
+            integrateOver = 1:numPoints^2
+        else
+            integrateOver = shellPointsChannels[channel]
+        end
+        kondoJRealSpace = 0 .* kondoJArray
+        @showprogress Threads.@threads for p1 in calculateFor
+            for p2 in calculateFor
+                r1, r2 = [map1DTo2D(p, numPoints) * 0.5 * numPoints / π for p in [p1, p2]]
+                p1_neg, p2_neg = (map2DTo1D((-1 .* r1)..., numPoints), map2DTo1D((-1 .* r2)..., numPoints))
+                if (p1_neg, p2_neg) ∈ keys(kondoJRealSpace)
+                    kondoJRealSpace[p1, p2] = kondoJRealSpace[p1_neg, p2_neg]
+                else
+                    kondoJRealSpace[p1, p2] = sum([kondoJArray[k1, k2] * cos(sum(r1 .* map1DTo2D(k1, numPoints)) - sum(r2 .* map1DTo2D(k2, numPoints)))
+                                                            for (k1, k2) in Iterators.product(integrateOver, integrateOver)])
+                end
+                kondoJRealSpace[p2, p1] = kondoJRealSpace[p1, p2]
+            end
+        end
+        kondoTemp = maximum(kondoJRealSpace)
+        if type == "static" || type == "QFI"
+            push!(realKondoChannels, kondoJRealSpace ./ length(integrateOver))
+        else
+            if maximum(kondoJRealSpace) > 1
+                kondoJRealSpace .*= 1.0 / maximum(kondoJRealSpace)
+            end
+            if maximum(kondoJRealSpace) < 0.3
+                kondoJRealSpace .*= 0.3 / maximum(kondoJRealSpace)
+            end
+            push!(realKondoChannels, kondoJRealSpace)
         end
     end
-    return kondoJReal
+    return realKondoChannels, kondoTemp
 end
 
 
@@ -319,163 +368,4 @@ function Integrate(
         xvals::Vector{Float64},
     )
     return sum([y * (xvals[i+1] - xvals[i]) for (i, y) in enumerate(yvals[1:end-1])]) + yvals[end] * (xvals[end] - xvals[end-1])
-end
-
-
-function SavePath(
-        prefix::String,
-        size_BZ::Int64,
-        couplings::Dict,
-        extension::String;
-        maxSize::Int64=0
-    )
-
-    if extension[1] ≠ '.'
-        extension = "." * extension
-    end
-    path = "$(prefix)_$(size_BZ)"
-
-    coupNames = ["omega_by_t", "Jf", "Jd", "J⟂", "Wf", "Wd", "ηf", "ηd"]
-    for k in coupNames
-        path *= "_$(couplings[k])"
-    end
-    if maxSize > 0
-        path *= "_$(maxSize)"
-    end
-    return path*"$(extension)"
-end
-
-
-function ReflectY(
-        point::Int64,
-        size_BZ::Int64,
-    )
-    kx, ky = map1DTo2D(point, size_BZ)
-    return map2DTo1D(-kx, ky, size_BZ)
-end
-
-
-function FillIn(limits)
-    return collect(limits[1]:limits[2]:limits[3])
-end
-
-
-function Resilient(
-        func::Function,
-        args...;
-        maxTries::Int=1,
-        numProcs::Int=10,
-        kwargs...
-    )
-
-    retries = 0
-    while retries < maxTries
-        try
-            if nprocs() == 1 && numProcs > 1
-                addprocs(numProcs)
-            end
-            println("Using $(nprocs()) processes and $(Threads.nthreads()) threads. $(retries) retries.")
-
-            @everywhere submitDir = pwd() * "/"
-            @everywhere if "SLURM_SUBMIT_DIR" in keys(ENV)
-                submitDir = ENV["SLURM_SUBMIT_DIR"] * "/"
-            end
-
-            @everywhere include(submitDir * "Constants.jl")
-            @everywhere include(submitDir * "Helpers.jl")
-            @everywhere include(submitDir * "RgFlow.jl")
-            @everywhere include(submitDir * "Models.jl")
-            @everywhere include(submitDir * "PhaseDiagram.jl")
-            @everywhere include(submitDir * "Probes.jl")
-            @everywhere include(submitDir * "PltStyle.jl")
-
-            func(args...; kwargs...)
-            break
-        catch e
-            showerror(stdout, e)
-            if nprocs() > 1
-                rmprocs(2:nprocs())
-            end
-            retries += 1
-        end
-    end
-end
-
-
-function ExtendedSaveName(
-        couplings::Dict{String, Any},
-    )
-    couplingNames = ["Uf", "Ud", "Wd", "Wf", "Jd", "Jf", "J⟂", "μd", "μf"]
-    components = []
-    for name in couplingNames
-        if length(couplings[name]) > 1
-            start, stop = [couplings[name][1], couplings[name][end]]
-            step = couplings[name][2] - couplings[name][1]
-            push!(components, "$(start)-$(step)-$(stop)")
-        else
-            push!(components, join((couplings[name][1], 0., couplings[name][1]), "-"))
-        end
-    end
-    return join(components, "-")
-end
-
-
-function ExtendedSaveName(
-        couplings::Dict{String, Float64},
-    )
-    couplingNames = ["epsilonF", "W", "Wf", "kondoPerp", "kondoF", "lightBandFactor", "mu_c"]
-    saveName = join([couplings[name] for name in couplingNames], "-")
-    return saveName
-end
-
-
-function NNNFunc(k1, k2, size_BZ) 
-    if isnothing(k1)
-        return 1.
-    else
-        (k1x, k1y), (k2x, k2y) = map1DTo2D([k1, k2], size_BZ)
-        return 0.5 * cos((k1x - k2x + k1y - k2y) / √2) + 0.5 * cos((k1x - k2x - k1y + k2y) / √2)
-    end
-end
-
-
-function NNFunc(k1, k2, size_BZ) 
-    if isnothing(k1)
-        return 1.
-    else
-        (k1x, k1y), (k2x, k2y) = map1DTo2D([k1, k2], size_BZ)
-        return 0.5 * cos(k1x - k2x) + 0.5 * cos(k1y - k2y)
-    end
-end
-
-
-function Nest(k, size_BZ)
-    kx, ky = map1DTo2D(k, size_BZ)
-    if kx ≥ 0
-        kx_prime, ky_prime = (kx, ky) .- (π, π)
-    else
-        kx_prime, ky_prime = (kx, ky) .- (-π, π)
-    end
-    return map2DTo1D(kx_prime, ky_prime, size_BZ)
-end
-
-
-function Normalise(specFunc, ω; tolerance=1e-4)
-    if maximum(specFunc) > tolerance
-        norm = abs(sum(specFunc) * (ω[2] - ω[1]))
-        specFunc /= norm
-    #=else=#
-    #=    println("Spetral function too small to be normalised: $(maximum(specFunc))")=#
-    end
-    return specFunc
-end
-
-function impCorr(Wf, U_by_W)
-    #=return minimum((12., abs(Wf) * U_by_W))=#
-    if abs(Wf) > 0.1
-        return abs(abs(Wf) - 0.1) * U_by_W
-    else
-        return 0.
-        #=return maximum((1., abs(abs(Wf) - 0.1) * U_by_W))=#
-    end
 end
