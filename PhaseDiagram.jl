@@ -59,8 +59,13 @@ function PhaseDiagram(
     @showprogress for ((x, J_val), (y, W_val)) in Iterators.product(enumerate(kondoJVals), enumerate(bathIntVals))
         polesMatrix[y, x] = CountPoles(size_BZ, J_val, W_val)
     end
-    p = heatmap(polesMatrix, title="\$N = $size_BZ\$", xlabel="\$J\$", ylabel="\$W\$")
+    p = heatmap(kondoJVals, abs.(bathIntVals), polesMatrix, title="\$N = $size_BZ\$", xlabel="\$J\$", ylabel="\$W\$")
     display(p)
+    savefig(p, "phaseDiagram.pdf")
 end
 
-PhaseDiagram(33, 0.05:0.04:0.3, 0:-0.05:-0.4)
+#### if you dont' have time
+PhaseDiagram(13, 0.05:0.01:0.3, 0:-0.02:-0.4)
+
+#### if you DO have time
+# PhaseDiagram(33, 0.05:0.01:0.3, 0:-0.02:-0.4)
